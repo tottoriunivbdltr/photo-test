@@ -234,155 +234,103 @@ function createSingleQuestion(
  * （同じ日付 + 同じID）
  * は候補に入れない。
  */
-function createQ5Question(pairs: Pair[]): PairQuestion | null {
-  // 同じIDで、異なる日付のペアが2つ以上存在するIDを探す
-  const idMap = new Map<string, Pair[]>();
-
-  for (const pair of pairs) {
-    if (pair.t === null && pair.r === null) {
-      continue;
-    }
-
-    if (!idMap.has(pair.id)) {
-      idMap.set(pair.id, []);
-    }
-
-    idMap.get(pair.id)!.push(pair);
-  }
-
-  // 「同じID・異なる日付」のペアが存在するIDだけを対象にする
-  const validTargets = Array.from(idMap.values())
-    .filter((sameIdPairs) => {
-      const dates = new Set(
-        sameIdPairs.map((pair) => pair.date)
-      );
-
-      return dates.size >= 2;
-    })
-    .flat();
-
-  if (validTargets.length === 0) {
-    return null;
-  }
-
-  // ターゲットをランダムに選ぶ
-  const target = shuffle(validTargets)[0];
-
-  // ターゲットと同じIDだが、異なる日付のペア
-  const matchingPairs = pairs.filter(
-    (pair) =>
-      pair.id === target.id &&
-      pair.date !== target.date
-  );
-
-  if (matchingPairs.length === 0) {
-    return null;
-  }
-
-  // ターゲットと異なるIDのペア
-  const nonMatchingPairs = pairs.filter(
-    (pair) =>
-      pair.id !== target.id
-  );
-
-  // 一致候補を最低1つ確保
-  const requiredMatch = shuffle(
-    matchingPairs
-  )[0];
-
-  // 残りの候補をランダムに選ぶ
-  const remainingCandidates = shuffle([
-    ...nonMatchingPairs,
-    ...matchingPairs.filter(
-      (pair) =>
-        pair.key !== requiredMatch.key
-    ),
-  ]);
-
-  const candidates = [
-    requiredMatch,
-    ...remainingCandidates.slice(0, 9),
-  ];
-
-  // 10個集まらなければ作成できない
-  if (candidates.length < 10) {
-    return null;
-  }
-
-  return {
-    target,
-    candidates: shuffle(candidates),
-  };
-}
-
-/**
- * Q6用
- *
- * ターゲットとIDが異なるペアだけで
- * 10候補を作る。
- */
-function createQ6Question(pairs: Pair[]): PairQuestion | null {
-  const availableTargets = pairs.filter(
-    (pair) => pair.t !== null || pair.r !== null
-  );
-
-  if (availableTargets.length === 0) {
-    return null;
-  }
-
-  const shuffledTargets = shuffle(availableTargets);
-
-  for (const target of shuffledTargets) {
-    const candidates = shuffle(
-      pairs.filter(
-        (pair) =>
-          pair.key !== target.key &&
-          pair.id !== target.id
-      )
-    ).slice(0, 10);
-
-    if (candidates.length === 10) {
-      return {
-        target,
-        candidates,
-      };
-    }
-  }
-
-  return null;
-}
-
-/**
- * Q7〜Q10用
- *
- * 完全ランダム。
- *
- * ただしターゲット自身のペアは
- * 候補には出さない。
- */
-function createRandomPairQuestion(
-  pairs: Pair[]
+function createPairQuestion(
+  pairs: Pair[],
+  candidateCount: number
 ): PairQuestion | null {
   const availablePairs = pairs.filter(
     (pair) => pair.t !== null || pair.r !== null
   );
 
-  if (availablePairs.length < 11) {
+  if (availablePairs.length < candidateCount + 1) {
     return null;
   }
 
-  const shuffled = shuffle(availablePairs);
+  // 一致あり／一致なしを50%の確率で決定
+  const wantMatch = Math.random() < 0.5;
 
-  const target = shuffled[0];
+  // ターゲット候補をシャッフル
+  const shuffledTargets = shuffle(availablePairs);
 
-  const candidates = shuffled.slice(1, 11);
+  for (const target of shuffledTargets) {
+    // ターゲット自身と同じペアは候補から除外
+    const otherPairs = availablePairs.filter(
+      (pair) => pair.key !== target.key
+    );
 
-  return {
-    target,
-    candidates,
-  };
+    const matchingPairs = otherPairs.filter(
+      (pair) => pair.id === target.id
+    );
+
+    const nonMatchingPairs = otherPairs.filter(
+      (pair) => pair.id !== target.id
+    );
+
+    // -----------------------------
+    // 一致なし問題
+    // -----------------------------
+    if (!wantMatch) {
+      if (nonMatchingPairs.length < candidateCount) {
+        continue;
+      }
+
+      return {
+        target,
+        candidates: shuffle(nonMatchingPairs).slice(
+          0,
+          candidateCount
+        ),
+      };
+    }
+
+    // -----------------------------
+    // 一致あり問題
+    // -----------------------------
+    if (matchingPairs.length === 0) {
+      continue;
+    }
+
+    // 一致する候補を1～最大数までランダムに決定
+    // ただし候補総数は candidateCount を超えない
+    const minMatchCount = Math.max(
+      1,
+      candidateCount - nonMatchingPairs.length
+    );
+
+    const maxMatchCount = Math.min(
+      matchingPairs.length,
+      candidateCount
+    );
+
+    if (minMatchCount > maxMatchCount) {
+      continue;
+    }
+
+    const matchCount =
+      Math.floor(
+        Math.random() *
+          (maxMatchCount - minMatchCount + 1)
+      ) + minMatchCount;
+
+    const selectedMatching = shuffle(
+      matchingPairs
+    ).slice(0, matchCount);
+
+    const selectedNonMatching = shuffle(
+      nonMatchingPairs
+    ).slice(0, candidateCount - matchCount);
+
+    return {
+      target,
+      candidates: shuffle([
+        ...selectedMatching,
+        ...selectedNonMatching,
+      ]),
+    };
+  }
+
+  return null;
 }
-
 function getPairImage(
   photo: Photo | null
 ): string | null {
@@ -477,10 +425,10 @@ export default function Home() {
           );
         }
 
-        if (loadedPairs.length < 11) {
-          throw new Error(
-            "t/rを組み合わせたペアが11組以上必要です。"
-          );
+        if (loadedPairs.length < 61) {
+         throw new Error(
+          "Q10を実施するには、t/rを組み合わせたペアが61組以上必要です。"
+         );
         }
        
       } catch (error) {
@@ -538,45 +486,23 @@ export default function Home() {
       return;
     }
 
-    if (q === 5) {
-      const question = createQ5Question(pairData);
+   if (q >= 5 && q <= 10) {
+      const candidateCount = (q - 4) * 10;
+
+      const question = createPairQuestion(
+        pairData,
+        candidateCount
+      );
 
       if (!question) {
         setErrorMessage(
-          "Q5を作成できませんでした。同じIDで異なる日付のt/rペアが必要です。"
+          `Q${q}を作成できませんでした。${candidateCount}組の候補を作成できる十分なペアデータが必要です。`
         );
         return;
       }
 
       setPairQuestion(question);
       return;
-    }
-
-    if (q === 6) {
-      const question = createQ6Question(pairData);
-
-      if (!question) {
-        setErrorMessage(
-          "Q6を作成できませんでした。ターゲットと異なるIDのペアが10組以上必要です。"
-        );
-        return;
-      }
-
-      setPairQuestion(question);
-      return;
-    }
-
-    if (q >= 7 && q <= 10) {
-      const question = createRandomPairQuestion(pairData);
-
-      if (!question) {
-        setErrorMessage(
-          `Q${q}を作成できませんでした。ペアが11組以上必要です。`
-        );
-        return;
-      }
-
-      setPairQuestion(question);
     }
   }
 
@@ -757,16 +683,21 @@ export default function Home() {
    * 次の候補・次の問題へ
    */
   function goToNext() {
-    if (currentIndex < 9) {
-      setCurrentIndex((prev) => prev + 1);
-      setSaving(false);
-      return;
-    }
+  const totalQuestions =
+    questionNumber <= 4
+      ? 10
+      : (questionNumber - 4) * 10;
 
-    setStarted(false);
-    setFinished(true);
+  if (currentIndex < totalQuestions - 1) {
+    setCurrentIndex((prev) => prev + 1);
     setSaving(false);
+    return;
   }
+
+  setStarted(false);
+  setFinished(true);
+  setSaving(false);
+}
 
   /**
    * ローディング
@@ -804,7 +735,13 @@ export default function Home() {
  * 照合成功率
  */
 if (finished) {
-  const successRate = correctCount * 10;
+  const totalQuestions =
+    questionNumber <= 4
+      ? 10
+      : (questionNumber - 4) * 10;
+
+  const successRate =
+    (correctCount / totalQuestions) * 100;
 
   return (
     <main className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
@@ -972,7 +909,8 @@ if (!started) {
             </h1>
 
             <p className="mt-2">
-              {currentIndex + 1} / 10
+              Q番号={questionNumber}
+              {currentIndex + 1} / {(questionNumber - 4) * 10}
             </p>
           </div>
 
