@@ -909,7 +909,7 @@ if (!started) {
             </h1>
 
             <p className="mt-2">
-              Q番号={questionNumber}
+        
               {currentIndex + 1} / {(questionNumber - 4) * 10}
             </p>
           </div>
