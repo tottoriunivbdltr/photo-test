@@ -6,216 +6,1092 @@ import { supabase } from "@/lib/supabase";
 type Photo = {
   name: string;
   url: string;
+  id: string;
+  date: string;
+  side: "b" | "t" | "r" | "l";
 };
 
-function getMatchId(filename: string) {
+type Pair = {
+  key: string;
+  id: string;
+  date: string;
+  t: Photo | null;
+  r: Photo | null;
+};
+
+type SingleQuestion = {
+  target: Photo;
+  candidates: Photo[];
+};
+
+type PairQuestion = {
+  target: Pair;
+  candidates: Pair[];
+};
+
+const BUCKET = "photos";
+
+const FOLDERS = {
+  b: "f_2026_tn_b",
+  t: "f_2026_tn_t",
+  r: "f_2026_tn_r",
+  l: "f_2026_tn_l",
+};
+
+function shuffle<T>(array: T[]): T[] {
+  const result = [...array];
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result;
+}
+
+/**
+ * ファイル名からIDを取得
+ *
+ * f_20260617_tn_A1_t.jpg
+ * → A1
+ */
+function getMatchId(filename: string): string {
   const parts = filename.split("_");
   return parts[3];
 }
 
-export default function Home() {
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [loading, setLoading] = useState(true);
+/**
+ * ファイル名から日付を取得
+ *
+ * f_20260617_tn_A1_t.jpg
+ * → 20260617
+ */
+function getDate(filename: string): string {
+  const parts = filename.split("_");
+  return parts[1];
+}
 
-  const [target, setTarget] = useState<Photo | null>(null);
-const [candidates, setCandidates] = useState<Photo[]>([]);
-const [currentIndex, setCurrentIndex] = useState(0);
+/**
+ * ファイル名から面を取得
+ *
+ * f_20260617_tn_A1_t.jpg
+ * → t
+ */
+function getSide(filename: string): "b" | "t" | "r" | "l" {
+  const parts = filename.split("_");
+  return parts[4].split(".")[0].toLowerCase() as "b" | "t" | "r" | "l";
+}
 
-const [startTime, setStartTime] = useState<number | null>(null);
-useEffect(() => {
-  if (target && candidates.length > 0) {
-    setStartTime(performance.now());
+async function loadFolder(
+  folder: string,
+  side: "b" | "t" | "r" | "l"
+): Promise<Photo[]> {
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .list(folder, {
+      limit: 1000,
+      sortBy: {
+        column: "name",
+        order: "asc",
+      },
+    });
+
+  if (error) {
+    throw new Error(`${folder} の読み込みに失敗しました: ${error.message}`);
   }
-}, [currentIndex, target, candidates]);
+
+  const photos: Photo[] = [];
+
+  for (const file of data ?? []) {
+    if (!file.name.toLowerCase().endsWith(".jpg")) {
+      continue;
+    }
+
+    const path = `${folder}/${file.name}`;
+
+    const { data: publicUrlData } = supabase.storage
+      .from(BUCKET)
+      .getPublicUrl(path);
+
+    photos.push({
+      name: file.name,
+      url: publicUrlData.publicUrl,
+      id: getMatchId(file.name),
+      date: getDate(file.name),
+      side,
+    });
+  }
+
+  return photos;
+}
+
+/**
+ * t/rを
+ *
+ * 「同じ日付 + 同じID」
+ *
+ * でペアにする。
+ *
+ * 片側しかない場合もPairとして残す。
+ */
+function makePairs(tPhotos: Photo[], rPhotos: Photo[]): Pair[] {
+  const map = new Map<string, Pair>();
+
+  for (const photo of tPhotos) {
+    const key = `${photo.date}_${photo.id}`;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        id: photo.id,
+        date: photo.date,
+        t: null,
+        r: null,
+      });
+    }
+
+    map.get(key)!.t = photo;
+  }
+
+  for (const photo of rPhotos) {
+    const key = `${photo.date}_${photo.id}`;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        id: photo.id,
+        date: photo.date,
+        t: null,
+        r: null,
+      });
+    }
+
+    map.get(key)!.r = photo;
+  }
+
+  return Array.from(map.values());
+}
+
+/**
+ * Q1〜Q4用
+ *
+ * ターゲットと同じIDの候補を最低1枚含め、
+ * 残りをランダムに選ぶ。
+ */
+function createSingleQuestion(
+  photos: Photo[],
+  target: Photo
+): SingleQuestion | null {
+  const otherPhotos = photos.filter(
+    (photo) => photo.name !== target.name
+  );
+
+  const matching = otherPhotos.filter(
+    (photo) => photo.id === target.id
+  );
+
+  if (matching.length === 0) {
+    return null;
+  }
+
+  const nonMatching = otherPhotos.filter(
+    (photo) => photo.id !== target.id
+  );
+
+  const requiredMatch = shuffle(matching)[0];
+
+  const remaining = shuffle([
+    ...nonMatching,
+    ...matching.filter(
+      (photo) => photo.name !== requiredMatch.name
+    ),
+  ]);
+
+  const candidates = [
+    requiredMatch,
+    ...remaining.slice(0, 9),
+  ];
+
+  if (candidates.length < 10) {
+    return null;
+  }
+
+  return {
+    target,
+    candidates: shuffle(candidates),
+  };
+}
+
+/**
+ * Q5用
+ *
+ * ターゲットと
+ * 「同じIDだが別の日付」
+ * のペアを最低1つ入れる。
+ *
+ * ターゲットと同じkey
+ * （同じ日付 + 同じID）
+ * は候補に入れない。
+ */
+function createQ5Question(pairs: Pair[]): PairQuestion | null {
+  // 同じIDで、異なる日付のペアが2つ以上存在するIDを探す
+  const idMap = new Map<string, Pair[]>();
+
+  for (const pair of pairs) {
+    if (pair.t === null && pair.r === null) {
+      continue;
+    }
+
+    if (!idMap.has(pair.id)) {
+      idMap.set(pair.id, []);
+    }
+
+    idMap.get(pair.id)!.push(pair);
+  }
+
+  // 「同じID・異なる日付」のペアが存在するIDだけを対象にする
+  const validTargets = Array.from(idMap.values())
+    .filter((sameIdPairs) => {
+      const dates = new Set(
+        sameIdPairs.map((pair) => pair.date)
+      );
+
+      return dates.size >= 2;
+    })
+    .flat();
+
+  if (validTargets.length === 0) {
+    return null;
+  }
+
+  // ターゲットをランダムに選ぶ
+  const target = shuffle(validTargets)[0];
+
+  // ターゲットと同じIDだが、異なる日付のペア
+  const matchingPairs = pairs.filter(
+    (pair) =>
+      pair.id === target.id &&
+      pair.date !== target.date
+  );
+
+  if (matchingPairs.length === 0) {
+    return null;
+  }
+
+  // ターゲットと異なるIDのペア
+  const nonMatchingPairs = pairs.filter(
+    (pair) =>
+      pair.id !== target.id
+  );
+
+  // 一致候補を最低1つ確保
+  const requiredMatch = shuffle(
+    matchingPairs
+  )[0];
+
+  // 残りの候補をランダムに選ぶ
+  const remainingCandidates = shuffle([
+    ...nonMatchingPairs,
+    ...matchingPairs.filter(
+      (pair) =>
+        pair.key !== requiredMatch.key
+    ),
+  ]);
+
+  const candidates = [
+    requiredMatch,
+    ...remainingCandidates.slice(0, 9),
+  ];
+
+  // 10個集まらなければ作成できない
+  if (candidates.length < 10) {
+    return null;
+  }
+
+  return {
+    target,
+    candidates: shuffle(candidates),
+  };
+}
+
+/**
+ * Q6用
+ *
+ * ターゲットとIDが異なるペアだけで
+ * 10候補を作る。
+ */
+function createQ6Question(pairs: Pair[]): PairQuestion | null {
+  const availableTargets = pairs.filter(
+    (pair) => pair.t !== null || pair.r !== null
+  );
+
+  if (availableTargets.length === 0) {
+    return null;
+  }
+
+  const shuffledTargets = shuffle(availableTargets);
+
+  for (const target of shuffledTargets) {
+    const candidates = shuffle(
+      pairs.filter(
+        (pair) =>
+          pair.key !== target.key &&
+          pair.id !== target.id
+      )
+    ).slice(0, 10);
+
+    if (candidates.length === 10) {
+      return {
+        target,
+        candidates,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Q7〜Q10用
+ *
+ * 完全ランダム。
+ *
+ * ただしターゲット自身のペアは
+ * 候補には出さない。
+ */
+function createRandomPairQuestion(
+  pairs: Pair[]
+): PairQuestion | null {
+  const availablePairs = pairs.filter(
+    (pair) => pair.t !== null || pair.r !== null
+  );
+
+  if (availablePairs.length < 11) {
+    return null;
+  }
+
+  const shuffled = shuffle(availablePairs);
+
+  const target = shuffled[0];
+
+  const candidates = shuffled.slice(1, 11);
+
+  return {
+    target,
+    candidates,
+  };
+}
+
+function getPairImage(
+  photo: Photo | null
+): string | null {
+  return photo?.url ?? null;
+}
+
+export default function Home() {
+  const [bPhotos, setBPhotos] = useState<Photo[]>([]);
+  const [tPhotos, setTPhotos] = useState<Photo[]>([]);
+  const [rPhotos, setRPhotos] = useState<Photo[]>([]);
+  const [lPhotos, setLPhotos] = useState<Photo[]>([]);
+
+  const [pairs, setPairs] = useState<Pair[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const [questionNumber, setQuestionNumber] = useState(1);
+  const [started, setStarted] = useState(false);
+  const [singleQuestion, setSingleQuestion] =
+    useState<SingleQuestion | null>(null);
+
+  const [pairQuestion, setPairQuestion] =
+    useState<PairQuestion | null>(null);
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const [finished, setFinished] = useState(false);
+
+  const [saving, setSaving] = useState(false);
+  const [correctCount, setCorrectCount] = useState(0);
+
+  /**
+   * 写真データを読み込む
+   */
   useEffect(() => {
     async function loadPhotos() {
-      const { data, error } = await supabase.storage
-        .from("photos")
-        .list("20260922(250)", {
-          limit: 1000,
-          sortBy: {
-            column: "name",
-            order: "asc",
-          },
-        });
+      try {
+        setLoading(true);
+        setErrorMessage("");
 
-      console.log("Supabase data:", data);
-      console.log("Supabase error:", error);
+        const [
+          loadedB,
+          loadedT,
+          loadedR,
+          loadedL,
+        ] = await Promise.all([
+          loadFolder(FOLDERS.b, "b"),
+          loadFolder(FOLDERS.t, "t"),
+          loadFolder(FOLDERS.r, "r"),
+          loadFolder(FOLDERS.l, "l"),
+        ]);
 
-      if (error) {
+        const loadedPairs = makePairs(
+          loadedT,
+          loadedR
+        );
+
+        setBPhotos(loadedB);
+        setTPhotos(loadedT);
+        setRPhotos(loadedR);
+        setLPhotos(loadedL);
+        setPairs(loadedPairs);
+
+        console.log("b photos:", loadedB);
+        console.log("t photos:", loadedT);
+        console.log("r photos:", loadedR);
+        console.log("l photos:", loadedL);
+        console.log("pairs:", loadedPairs);
+
+        if (loadedB.length < 11) {
+          throw new Error(
+            "f_2026_tn_b に11枚以上の写真が必要です。"
+          );
+        }
+
+        if (loadedT.length < 11) {
+          throw new Error(
+            "f_2026_tn_t に11枚以上の写真が必要です。"
+          );
+        }
+
+        if (loadedR.length < 11) {
+          throw new Error(
+            "f_2026_tn_r に11枚以上の写真が必要です。"
+          );
+        }
+
+        if (loadedL.length < 11) {
+          throw new Error(
+            "f_2026_tn_l に11枚以上の写真が必要です。"
+          );
+        }
+
+        if (loadedPairs.length < 11) {
+          throw new Error(
+            "t/rを組み合わせたペアが11組以上必要です。"
+          );
+        }
+       
+      } catch (error) {
         console.error(error);
+
+        if (error instanceof Error) {
+          setErrorMessage(error.message);
+        } else {
+          setErrorMessage(
+            "写真データの読み込みに失敗しました。"
+          );
+        }
+      } finally {
         setLoading(false);
-        return;
       }
-
-      const photoList =
-        data
-          ?.filter((file) => file.name.toLowerCase().endsWith(".jpg"))
-          .map((file) => ({
-            name: file.name,
-            url: supabase.storage
-              .from("photos")
-              .getPublicUrl(`20260922(250)/${file.name}`).data.publicUrl,
-          })) ?? [];
-
-      setPhotos(photoList);
-      setLoading(false);
-
-      // ターゲットをランダムに1枚選ぶ
-if (photoList.length >= 11) {
-  const shuffled = [...photoList].sort(() => Math.random() - 0.5);
-
-  const randomTarget = shuffled[0];
-  const randomCandidates = shuffled.slice(1, 11);
-
-  setTarget(randomTarget);
-  setCandidates(randomCandidates);
-}
     }
+    
 
     loadPhotos();
   }, []);
 
- async function handleAnswer(answer: "match" | "no-match") {
-  const currentCandidate = candidates[currentIndex];
+  /**
+   * 問題を作成
+   */
+  function createQuestion(
+    q: number,
+    b: Photo[] = bPhotos,
+    t: Photo[] = tPhotos,
+    r: Photo[] = rPhotos,
+    l: Photo[] = lPhotos,
+    pairData: Pair[] = pairs
+  ) {
+    setQuestionNumber(q);
+    setCurrentIndex(0);
+    setSingleQuestion(null);
+    setPairQuestion(null);
 
-  if (!target || !currentCandidate || startTime === null) {
-    return;
+    if (q === 1) {
+      createSingleForQuestion(b);
+      return;
+    }
+
+    if (q === 2) {
+      createSingleForQuestion(t);
+      return;
+    }
+
+    if (q === 3) {
+      createSingleForQuestion(r);
+      return;
+    }
+
+    if (q === 4) {
+      createSingleForQuestion(l);
+      return;
+    }
+
+    if (q === 5) {
+      const question = createQ5Question(pairData);
+
+      if (!question) {
+        setErrorMessage(
+          "Q5を作成できませんでした。同じIDで異なる日付のt/rペアが必要です。"
+        );
+        return;
+      }
+
+      setPairQuestion(question);
+      return;
+    }
+
+    if (q === 6) {
+      const question = createQ6Question(pairData);
+
+      if (!question) {
+        setErrorMessage(
+          "Q6を作成できませんでした。ターゲットと異なるIDのペアが10組以上必要です。"
+        );
+        return;
+      }
+
+      setPairQuestion(question);
+      return;
+    }
+
+    if (q >= 7 && q <= 10) {
+      const question = createRandomPairQuestion(pairData);
+
+      if (!question) {
+        setErrorMessage(
+          `Q${q}を作成できませんでした。ペアが11組以上必要です。`
+        );
+        return;
+      }
+
+      setPairQuestion(question);
+    }
   }
 
-  const targetId = getMatchId(target.name);
-  const candidateId = getMatchId(currentCandidate.name);
+  function createSingleForQuestion(
+    photos: Photo[]
+  ) {
+    const shuffledPhotos = shuffle(photos);
 
-  const correctAnswer =
-    targetId === candidateId ? "match" : "no-match";
+    for (const target of shuffledPhotos) {
+      const question = createSingleQuestion(
+        photos,
+        target
+      );
 
-  const isCorrect = answer === correctAnswer;
+      if (question) {
+        setSingleQuestion(question);
+        return;
+      }
+    }
 
-  const responseTimeMs = Math.round(
-    performance.now() - startTime
-  );
+    setErrorMessage(
+      `Q${questionNumber}を作成できませんでした。同じIDの別写真が必要です。`
+    );
+  }
 
-  console.log("回答:", {
-    target: target.name,
-    candidate: currentCandidate.name,
-    targetId,
-    candidateId,
-    answer,
-    correctAnswer,
-    isCorrect,
-    responseTimeMs,
-    responseTimeSeconds: responseTimeMs / 1000,
-  });
+  /**
+   * Q1〜Q4の回答保存
+   */
+  async function saveSingleAnswer(
+    candidate: Photo,
+    answer: "一致" | "不一致"
+  ) {
+    if (!singleQuestion || saving) {
+      return;
+    }
 
-  // Supabaseに回答結果を保存
-  const { error } = await supabase
-    .from("comparison_results")
-    .insert({
-      target: target.name,
-      candidate: currentCandidate.name,
-      answer: answer,
-      is_correct: isCorrect,
-      response_time_ms: responseTimeMs,
+    setSaving(true);
+
+    const correctAnswer =
+      candidate.id === singleQuestion.target.id
+        ? "一致"
+        : "不一致";
+
+    const isCorrect =
+      answer === correctAnswer;
+    if (isCorrect) {
+      setCorrectCount((prev) => prev + 1);
+    }
+
+    const tableName =
+      `comparison_results_q${questionNumber}`;
+
+    const { error } = await supabase
+      .from(tableName)
+      .insert({
+        target: singleQuestion.target.name,
+        candidate: candidate.name,
+        answer,
+        is_correct: isCorrect,
+      });
+
+    if (error) {
+      console.error(error);
+
+      alert(
+        `回答の保存に失敗しました。\n${error.message}`
+      );
+
+      setSaving(false);
+      return;
+    }
+
+    console.log("回答保存成功:", {
+      questionNumber,
+      target: singleQuestion.target.name,
+      candidate: candidate.name,
+      targetId: singleQuestion.target.id,
+      candidateId: candidate.id,
+      answer,
+      correctAnswer,
+      isCorrect,
     });
 
-  if (error) {
-    console.error("Supabaseへの保存に失敗しました:", error);
-    alert("回答の保存に失敗しました。");
-    return;
+    goToNext();
   }
 
-  console.log("Supabaseへの保存に成功しました。");
+  /**
+   * Q5〜Q10の回答保存
+   */
+  async function savePairAnswer(
+    candidate: Pair,
+    answer: "一致" | "不一致"
+  ) {
+    if (!pairQuestion || saving) {
+      return;
+    }
 
-  if (currentIndex < candidates.length - 1) {
-    setCurrentIndex(currentIndex + 1);
-  } else {
-    alert("すべての比較が終了しました。");
+    setSaving(true);
+
+    const correctAnswer =
+      candidate.id === pairQuestion.target.id
+        ? "一致"
+        : "不一致";
+
+    const isCorrect =
+      answer === correctAnswer;
+    if (isCorrect) {
+      setCorrectCount((prev) => prev + 1);
+    }
+
+    let tableName = "";
+
+    if (questionNumber === 5) {
+      tableName = "comparison_results_q5";
+    } else if (questionNumber === 6) {
+      tableName = "comparison_results_q6";
+    } else {
+      tableName = "comparison_results_q7_10";
+    }
+
+    const data: Record<string, unknown> = {
+      target_1: getPairImage(
+        pairQuestion.target.t
+      )
+        ? pairQuestion.target.t!.name
+        : null,
+
+      target_2: getPairImage(
+        pairQuestion.target.r
+      )
+        ? pairQuestion.target.r!.name
+        : null,
+
+      candidate_1: getPairImage(candidate.t)
+        ? candidate.t!.name
+        : null,
+
+      candidate_2: getPairImage(candidate.r)
+        ? candidate.r!.name
+        : null,
+
+      answer,
+      is_correct: isCorrect,
+    };
+
+    if (questionNumber >= 7) {
+      data.question_number = questionNumber;
+    }
+
+    const { error } = await supabase
+      .from(tableName)
+      .insert(data);
+
+    if (error) {
+      console.error(error);
+
+      alert(
+        `回答の保存に失敗しました。\n${error.message}`
+      );
+
+      setSaving(false);
+      return;
+    }
+
+    console.log("回答保存成功:", {
+      questionNumber,
+      target: pairQuestion.target,
+      candidate,
+      answer,
+      correctAnswer,
+      isCorrect,
+    });
+
+    goToNext();
   }
-}
 
+  /**
+   * 次の候補・次の問題へ
+   */
+  function goToNext() {
+    if (currentIndex < 9) {
+      setCurrentIndex((prev) => prev + 1);
+      setSaving(false);
+      return;
+    }
+
+    setStarted(false);
+    setFinished(true);
+    setSaving(false);
+  }
+
+  /**
+   * ローディング
+   */
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center">
-        <p>写真を読み込んでいます...</p>
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-xl">
+          写真を読み込んでいます...
+        </p>
       </main>
     );
   }
 
-  if (!target || candidates.length === 0) {
+  /**
+   * エラー
+   */
+  if (errorMessage) {
     return (
-      <main className="flex min-h-screen items-center justify-center">
-        <p>写真が足りません。</p>
+      <main className="min-h-screen flex items-center justify-center p-6">
+        <div className="max-w-xl text-center">
+          <h1 className="text-2xl font-bold mb-4">
+            エラー
+          </h1>
+
+          <p className="whitespace-pre-wrap">
+            {errorMessage}
+          </p>
+        </div>
       </main>
     );
   }
 
-  const currentCandidate = candidates[currentIndex];
+/**
+ * 照合成功率
+ */
+if (finished) {
+  const successRate = correctCount * 10;
 
   return (
-    <main className="min-h-screen bg-gray-100 p-6">
-      <div className="mx-auto max-w-5xl">
-        <h1 className="mb-8 text-center text-2xl font-bold">
-          写真比較
+    <main className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+      <div className="text-center">
+        <h1 className="text-3xl font-bold mb-6">
+          照合成功率
         </h1>
 
-        <div className="mb-8 text-center">
-          <p className="text-lg font-semibold">
-            {currentIndex + 1} / {candidates.length}
-          </p>
-          <p className="mt-1 text-sm text-gray-600">
-            2枚の写真を見比べてください
-          </p>
-        </div>
+        <p className="text-6xl font-bold mb-8">
+          {successRate}%
+        </p>
 
-        <div className="grid gap-8 md:grid-cols-2">
-          {/* ターゲット写真 */}
-          <section className="rounded-xl bg-white p-4 shadow">
-            <h2 className="mb-3 text-center text-lg font-bold">
-              ターゲット
-            </h2>
+        <button
+          onClick={() => {
+            setFinished(false);
+          }}
+          className="bg-white rounded-xl shadow px-8 py-4 text-xl font-bold hover:bg-gray-100"
+        >
+          トップへ戻る
+        </button>
+      </div>
+    </main>
+  );
+}
 
-            <div className="flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-gray-100">
-              <img
-                src={target.url}
-                alt="ターゲット写真"
-                className="max-h-full max-w-full object-contain"
-              />
-            </div>
-          </section>
+/**
+ * 問題選択
+ */
+if (!started) {
+  return (
+    <main className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+      <div className="w-full max-w-2xl">
+        <h1 className="text-3xl font-bold text-center mb-8">
+          問題を選択してください
+        </h1>
 
-          {/* 候補写真 */}
-          <section className="rounded-xl bg-white p-4 shadow">
-            <h2 className="mb-3 text-center text-lg font-bold">
-              候補写真
-            </h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {Array.from({ length: 10 }, (_, index) => {
+            const q = index + 1;
 
-            <div className="flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-gray-100">
-              <img
-                src={currentCandidate.url}
-                alt="候補写真"
-                className="max-h-full max-w-full object-contain"
-              />
-            </div>
-          </section>
-        </div>
-
-        {/* 回答ボタン */}
-        <div className="mx-auto mt-8 flex max-w-xl gap-4">
-          <button
-            onClick={() => handleAnswer("match")}
-            className="flex-1 rounded-xl bg-green-600 px-6 py-4 text-lg font-bold text-white hover:bg-green-700"
-          >
-            一致
-          </button>
-
-          <button
-            onClick={() => handleAnswer("no-match")}
-            className="flex-1 rounded-xl bg-red-600 px-6 py-4 text-lg font-bold text-white hover:bg-red-700"
-          >
-            不一致
-          </button>
+            return (
+              <button
+                key={q}
+                onClick={() => {
+                  setStarted(true);
+                  setFinished(false);
+                  setCorrectCount(0);
+                  createQuestion(q);
+                }}
+                className="bg-white rounded-xl shadow p-6 text-2xl font-bold hover:bg-gray-100"
+              >
+                Q{q}
+              </button>
+            );
+          })}
         </div>
       </div>
     </main>
   );
+}
+  /**
+   * Q1〜Q4
+   */
+  if (
+    questionNumber <= 4 &&
+    singleQuestion
+  ) {
+    const candidate =
+      singleQuestion.candidates[currentIndex];
+
+    return (
+      <main className="min-h-screen bg-gray-100 p-4 md:p-8">
+        <div className="max-w-5xl mx-auto">
+
+          <div className="mb-6 text-center">
+            <h1 className="text-2xl font-bold">
+              Q{questionNumber}
+            </h1>
+
+            <p className="mt-2">
+              {currentIndex + 1} / 10
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+            {/* ターゲット */}
+            <section className="bg-white rounded-xl p-4 shadow">
+              <h2 className="text-xl font-bold text-center mb-4">
+                ターゲット
+              </h2>
+
+              <img
+                src={singleQuestion.target.url}
+                alt="ターゲット"
+                className="w-full max-h-[60vh] object-contain"
+              />
+            </section>
+
+            {/* 候補 */}
+            <section className="bg-white rounded-xl p-4 shadow">
+              <h2 className="text-xl font-bold text-center mb-4">
+                候補
+              </h2>
+
+              <img
+                src={candidate.url}
+                alt="候補"
+                className="w-full max-h-[60vh] object-contain"
+              />
+            </section>
+
+          </div>
+
+          <div className="mt-8 flex justify-center gap-4">
+            <button
+              onClick={() =>
+                saveSingleAnswer(
+                  candidate,
+                  "一致"
+                )
+              }
+              disabled={saving}
+              className="px-10 py-4 bg-green-600 text-white rounded-xl text-xl font-bold disabled:opacity-50"
+            >
+              一致
+            </button>
+
+            <button
+              onClick={() =>
+                saveSingleAnswer(
+                  candidate,
+                  "不一致"
+                )
+              }
+              disabled={saving}
+              className="px-10 py-4 bg-red-600 text-white rounded-xl text-xl font-bold disabled:opacity-50"
+            >
+              不一致
+            </button>
+          </div>
+
+        </div>
+      </main>
+    );
+  }
+
+  /**
+   * Q5〜Q10
+   */
+  if (
+    questionNumber >= 5 &&
+    pairQuestion
+  ) {
+    const candidate =
+      pairQuestion.candidates[currentIndex];
+
+    return (
+      <main className="min-h-screen bg-gray-100 p-4 md:p-8">
+        <div className="max-w-7xl mx-auto">
+
+          <div className="mb-6 text-center">
+            <h1 className="text-2xl font-bold">
+              Q{questionNumber}
+            </h1>
+
+            <p className="mt-2">
+              {currentIndex + 1} / 10
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+            {/* ターゲット */}
+            <section className="bg-white rounded-xl p-4 shadow">
+              <h2 className="text-xl font-bold text-center mb-4">
+                ターゲット
+              </h2>
+
+              <div className="grid grid-cols-2 gap-4">
+
+                <div className="border rounded-lg p-2">
+                  {pairQuestion.target.t ? (
+                    <img
+                      src={pairQuestion.target.t.url}
+                      alt="ターゲット t"
+                      className="w-full h-64 object-contain"
+                    />
+                  ) : (
+                    <div className="w-full h-64 flex items-center justify-center bg-gray-200 text-gray-600 font-bold">
+                      データなし
+                    </div>
+                  )}
+                </div>
+
+                <div className="border rounded-lg p-2">
+                  {pairQuestion.target.r ? (
+                    <img
+                      src={pairQuestion.target.r.url}
+                      alt="ターゲット r"
+                      className="w-full h-64 object-contain"
+                    />
+                  ) : (
+                    <div className="w-full h-64 flex items-center justify-center bg-gray-200 text-gray-600 font-bold">
+                      データなし
+                    </div>
+                  )}
+                </div>
+
+              </div>
+
+            </section>
+
+            {/* 候補 */}
+            <section className="bg-white rounded-xl p-4 shadow">
+              <h2 className="text-xl font-bold text-center mb-4">
+                候補
+              </h2>
+
+              <div className="grid grid-cols-2 gap-4">
+
+                <div className="border rounded-lg p-2">
+                  {candidate.t ? (
+                    <img
+                      src={candidate.t.url}
+                      alt="候補 t"
+                      className="w-full h-64 object-contain"
+                    />
+                  ) : (
+                    <div className="w-full h-64 flex items-center justify-center bg-gray-200 text-gray-600 font-bold">
+                      データなし
+                    </div>
+                  )}
+                </div>
+
+                <div className="border rounded-lg p-2">
+                  {candidate.r ? (
+                    <img
+                      src={candidate.r.url}
+                      alt="候補 r"
+                      className="w-full h-64 object-contain"
+                    />
+                  ) : (
+                    <div className="w-full h-64 flex items-center justify-center bg-gray-200 text-gray-600 font-bold">
+                      データなし
+                    </div>
+                  )}
+                </div>
+
+              </div>
+
+            </section>
+
+          </div>
+
+          <div className="mt-8 flex justify-center gap-4">
+            <button
+              onClick={() =>
+                savePairAnswer(
+                  candidate,
+                  "一致"
+                )
+              }
+              disabled={saving}
+              className="px-10 py-4 bg-green-600 text-white rounded-xl text-xl font-bold disabled:opacity-50"
+            >
+              一致
+            </button>
+
+            <button
+              onClick={() =>
+                savePairAnswer(
+                  candidate,
+                  "不一致"
+                )
+              }
+              disabled={saving}
+              className="px-10 py-4 bg-red-600 text-white rounded-xl text-xl font-bold disabled:opacity-50"
+            >
+              不一致
+            </button>
+          </div>
+
+        </div>
+      </main>
+    );
+  }
+
+  return null;
 }
