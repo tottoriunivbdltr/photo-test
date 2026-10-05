@@ -350,6 +350,7 @@ export default function Home() {
 
   const [questionNumber, setQuestionNumber] = useState(1);
   const [started, setStarted] = useState(false);
+  const [consented, setConsented] = useState(false);
   const [singleQuestion, setSingleQuestion] =
     useState<SingleQuestion | null>(null);
 
@@ -704,6 +705,7 @@ export default function Home() {
    */
   if (loading) {
     return (
+    
       <main className="min-h-screen flex items-center justify-center">
         <p className="text-xl">
           写真を読み込んでいます...
@@ -711,6 +713,56 @@ export default function Home() {
       </main>
     );
   }
+  if (!consented) {
+  return (
+    <main className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+      <div className="bg-white rounded-2xl shadow-lg p-8 max-w-3xl w-full">
+        <h1 className="text-3xl md:text-4xl font-bold text-center mb-8">
+          トノサマガエルの識別テスト
+        </h1>
+
+        <h2 className="text-xl font-bold mb-4">
+          注意事項
+        </h2>
+
+        <ul className="space-y-4 text-base md:text-lg leading-relaxed">
+          <li>
+            ・本研究は、トノサマガエルのナチュラルマーキングを利用した個体識別を目的としています。
+          </li>
+
+          <li>
+            ・ターゲットと候補の写真を見比べ、同じ個体だと思えば「一致」、異なる個体だと思えば「不一致」を押してください。
+          </li>
+
+          <li>
+            ・すべての問題で、必ずしもターゲットと候補が一致するパターンがあるとは限りません。一致しない問題や、複数の候補が一致する問題もあります。
+          </li>
+
+          <li>
+            ・候補の枚数が多い問題では、回答に時間がかかる可能性がありますのでご注意ください。
+          </li>
+
+          <li>
+            ・一回ですべての問題に回答する必要はありません。1問ごとにブラウザを閉じていただいても構いません。ただし、一度開始した問題は最後まで回答してください。
+          </li>
+
+          <li>
+            ・各問題への回答は、1人につき1回まででお願いいたします。
+          </li>
+        </ul>
+
+        <div className="mt-8 text-center">
+          <button
+            onClick={() => setConsented(true)}
+            className="bg-blue-600 text-white rounded-xl px-8 py-4 text-xl font-bold hover:bg-blue-700"
+          >
+            同意してテストを開始する
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
 
   /**
    * エラー
@@ -793,7 +845,15 @@ if (!started) {
                 }}
                 className="bg-white rounded-xl shadow p-6 text-2xl font-bold hover:bg-gray-100"
               >
-                Q{q}
+                {q === 1
+                  ? "Q1　背中"
+                  : q === 2
+                  ? "Q2　脚"
+                  : q === 3
+                  ? "Q3　右側"
+                  : q === 4
+                  ? "Q4　左側"
+                  : `Q${q}　${(q - 4) * 10}枚`}
               </button>
             );
           })}
