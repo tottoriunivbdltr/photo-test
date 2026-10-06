@@ -351,6 +351,7 @@ export default function Home() {
   const [questionNumber, setQuestionNumber] = useState(1);
   const [started, setStarted] = useState(false);
   const [consented, setConsented] = useState(false);
+  const [participantId, setParticipantId] = useState<number | null>(null);
   const [singleQuestion, setSingleQuestion] =
     useState<SingleQuestion | null>(null);
 
@@ -563,6 +564,7 @@ export default function Home() {
         candidate: candidate.name,
         answer,
         is_correct: isCorrect,
+        participant_id: participantId,
       });
 
     if (error) {
@@ -647,6 +649,7 @@ export default function Home() {
 
       answer,
       is_correct: isCorrect,
+      participant_id: participantId,
     };
 
     if (questionNumber >= 7) {
@@ -751,14 +754,53 @@ export default function Home() {
           </li>
         </ul>
 
-        <div className="mt-8 text-center">
-          <button
-            onClick={() => setConsented(true)}
-            className="bg-blue-600 text-white rounded-xl px-8 py-4 text-xl font-bold hover:bg-blue-700"
-          >
-            同意してテストを開始する
-          </button>
-        </div>
+         <div className="mt-8 text-center space-y-4">
+           <button
+             onClick={async () => {
+               const { data, error } = await supabase
+                 .from("participants")
+                 .insert({})
+                 .select("id")
+                 .single();
+
+               if (error) {
+                 console.error(error);
+                 setErrorMessage("参加者番号の取得に失敗しました。");
+                 return;
+                }
+
+                setParticipantId(data.id);
+                alert(`あなたの参加者番号は「${data.id}」です。\n次回参加するときに必要になりますので、番号を控えてください。`);
+                setConsented(true);
+              }}
+              className="bg-blue-600 text-white rounded-xl px-8 py-4 text-xl font-bold hover:bg-blue-700"
+             >
+              初めて参加する
+             </button>
+
+             <button
+               onClick={() => {
+                 const id = window.prompt("参加者番号を入力してください。");
+
+                 if (!id) {
+                   return;
+                 }
+
+                 const participantNumber = Number(id);
+
+                 if (!Number.isInteger(participantNumber) || participantNumber <= 0) {
+                   setErrorMessage("正しい参加者番号を入力してください。");
+                   return;
+                  }
+
+                 setParticipantId(participantNumber);
+                 setConsented(true);
+               }}
+               className="bg-gray-600 text-white rounded-xl px-8 py-4 text-xl font-bold hover:bg-gray-700"
+              >
+               以前参加したことがある
+             </button>
+           </div>
       </div>
     </main>
   );
